@@ -7,6 +7,7 @@ of an asset study. The QAOA angles come from the study's local training fit.
 
 import argparse
 from datetime import datetime, timezone
+from getpass import getpass
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 from assetlab.pipeline import code_provenance, write_json
 from assetlab.quantum import qiskit_circuit
 from assetlab.selection import summarize_counts
+from assetlab.report import refresh_report
 
 
 def load_run(path):
@@ -49,17 +51,48 @@ def prepare(path):
     return path, data, problem, circuit
 
 
+def login():
+    """Save credentials locally; this does not connect or submit a workload."""
+    from qiskit_ibm_runtime import QiskitRuntimeService
+    from qiskit_ibm_runtime.accounts.exceptions import AccountAlreadyExistsError
+
+    key = getpass("IBM Quantum API key (hidden): ").strip()
+    instance = input("Open Plan instance CRN: ").strip()
+    if not key:
+        raise ValueError("The API key cannot be empty. Create one on the IBM Quantum dashboard.")
+    if not instance.startswith("crn:"):
+        raise ValueError("Paste the full instance CRN beginning with 'crn:', not the instance name.")
+    try:
+        QiskitRuntimeService.save_account(
+            channel="ibm_quantum_platform", token=key, instance=instance,
+            set_as_default=True,
+        )
+    except AccountAlreadyExistsError:
+        raise ValueError("An IBM Quantum account is already saved; existing credentials were kept. "
+                         "Use that account or supply IBM_QUANTUM_API_KEY and IBM_QUANTUM_INSTANCE "
+                         "for this Terminal session.") from None
+    print("IBM credentials saved locally for future Terminal sessions. "
+          "No connection or hardware job was submitted.")
+
+
 def service():
     from qiskit_ibm_runtime import QiskitRuntimeService
+    from qiskit_ibm_runtime.accounts.exceptions import AccountNotFoundError
 
     # Neither tokens nor environment contents are written into result files.
-    key = os.environ.get("IBM_QUANTUM_API_KEY")
-    instance = os.environ.get("IBM_QUANTUM_INSTANCE")
+    key = (os.environ.get("IBM_QUANTUM_API_KEY") or "").strip()
+    instance = (os.environ.get("IBM_QUANTUM_INSTANCE") or "").strip()
     if key:
         if not instance:
             raise ValueError("Set IBM_QUANTUM_INSTANCE to the intended instance CRN alongside the API key.")
         return QiskitRuntimeService(channel="ibm_quantum_platform", token=key, instance=instance)
-    return QiskitRuntimeService(instance=instance) if instance else QiskitRuntimeService()
+    try:
+        return QiskitRuntimeService(instance=instance) if instance else QiskitRuntimeService()
+    except AccountNotFoundError:
+        raise ValueError("No IBM Quantum API key is available and no saved account was found. "
+                         "Run 'python ibm_quantum.py login', or set IBM_QUANTUM_API_KEY "
+                         "and IBM_QUANTUM_INSTANCE in this Terminal session. "
+                         "No hardware job was submitted.") from None
 
 
 def submit(path, backend_name, shots, max_seconds):
@@ -120,14 +153,17 @@ def collect(path):
     result.update(backend=receipt["backend"], job_id=receipt["job_id"],
                   collected_at_utc=datetime.now(timezone.utc).isoformat(), hardware_executed=True)
     write_json(folder / "hardware_results.json", result)
+    refresh_report(path)
     print(f"Feasible shots: {result['feasible_fraction']:.1%}; optimal shots: {result['optimal_fraction']:.1%}")
     print(f"Saved {folder / 'hardware_results.json'}")
+    print(f"Updated report: {path / 'report.html'}")
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
-    for action in ("prepare", "submit", "collect"):
+    subparsers.add_parser("login", help="save IBM credentials locally with a hidden API-key prompt")
+    for action in ("prepare", "submit", "collect", "report"):
         command = subparsers.add_parser(action)
         command.add_argument("--run", required=True, type=Path)
         if action == "submit":
@@ -136,9 +172,14 @@ def main(argv=None):
             command.add_argument("--max-execution-seconds", type=int, default=60)
     args = parser.parse_args(argv)
     try:
-        if args.action == "prepare":
+        if args.action == "login":
+            login()
+        elif args.action == "prepare":
             path, _, _, _ = prepare(args.run)
             print(f"Prepared local circuit: {path / 'ibm' / 'circuit.qasm'}; no hardware job submitted.")
+        elif args.action == "report":
+            refresh_report(args.run)
+            print(f"Updated report: {args.run / 'report.html'}; no IBM connection needed.")
         elif args.action == "submit":
             if not 1 <= args.shots <= 100000 or not 1 <= args.max_execution_seconds <= 600:
                 raise ValueError("Use 1-100000 shots and a 1-600 second execution limit.")

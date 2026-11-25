@@ -1,4 +1,4 @@
-"""Immutable run folders, data snapshots, results, and provenance."""
+"""Run snapshots and provenance, with recorded revisions to derived reports."""
 
 from datetime import datetime, timezone
 import hashlib
@@ -36,7 +36,7 @@ def write_json(path, value):
 
 def code_provenance():
     root = Path(__file__).resolve().parent.parent
-    files = [root / "asset_lab.py", root / "ibm_quantum.py", root / "requirements.txt"]
+    files = [root / "asset_lab.py", root / "trade_lab.py", root / "ibm_quantum.py", root / "benchmark_asset_lab.py", root / "requirements.txt"]
     files += sorted((root / "assetlab").glob("*.py"))
     files += sorted((root / "assetlab").glob("*.html"))
     hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -47,7 +47,7 @@ def code_provenance():
     except (OSError, subprocess.CalledProcessError):
         commit, dirty = None, None
     packages = {}
-    for name in ("numpy", "pandas", "scipy", "yfinance", "qiskit", "qiskit-ibm-runtime"):
+    for name in ("numpy", "pandas", "scipy", "statsmodels", "yfinance", "qiskit", "qiskit-ibm-runtime"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -63,6 +63,12 @@ def run_study(config, *, csv_path=None, cache_dir="data_cache/asset_lab", out="r
         csv_path=csv_path, cache_dir=cache_dir, refresh=refresh, seed=config["seed"],
     )
     payload, returns = analyze(prices, provenance, config)
+    return save_results(payload, prices, returns, out)
+
+
+def save_results(payload, prices, returns, out="results_asset_lab"):
+    """Export one study, including benchmark cases fitted to a frozen panel."""
+    config, provenance = payload["config"], payload["provenance"]
     now = datetime.now(timezone.utc)
     run_id = now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output = Path(out).resolve() / run_id

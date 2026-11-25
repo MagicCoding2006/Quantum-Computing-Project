@@ -11,6 +11,7 @@ import pandas as pd
 
 from assetlab.data import DEFAULT_TICKERS, ticker_list
 from assetlab.pipeline import run_study
+from assetlab.selection import MAX_CANDIDATES
 
 
 def main(argv=None):
@@ -22,7 +23,7 @@ def main(argv=None):
     parser.add_argument("--start", default="2018-01-01")
     parser.add_argument("--end", default=datetime.now(timezone.utc).date().isoformat(), help="exclusive end date")
     parser.add_argument("--train-fraction", type=float, default=0.7)
-    parser.add_argument("--candidates", nargs="+", help="2-10 tickers in fixed order; default first six of universe")
+    parser.add_argument("--candidates", nargs="+", help=f"2-{MAX_CANDIDATES} tickers in fixed order; default first six of universe")
     parser.add_argument("--choose", type=int, default=3)
     parser.add_argument("--windows", nargs="+", type=int, default=[60, 120, 252])
     parser.add_argument("--layers", type=int, choices=[1, 2, 3], default=1)
@@ -36,8 +37,8 @@ def main(argv=None):
     try:
         tickers = ticker_list(args.tickers or DEFAULT_TICKERS)
         candidates = ticker_list(args.candidates) if args.candidates else tickers[:6]
-        if not 2 <= len(candidates) <= 10 or any(t not in tickers for t in candidates):
-            raise ValueError("Candidates must be 2-10 distinct members of --tickers.")
+        if not 2 <= len(candidates) <= MAX_CANDIDATES or any(t not in tickers for t in candidates):
+            raise ValueError(f"Candidates must be 2-{MAX_CANDIDATES} distinct members of --tickers.")
         if not 1 <= args.choose < len(candidates):
             raise ValueError("--choose must be between 1 and the number of candidates minus one.")
         if not 0.5 <= args.train_fraction <= 0.85:

@@ -77,7 +77,7 @@ def analyze(prices, provenance, config):
             "Sample covariance is not regularized. Selection may be unstable across periods.",
             "The candidate order is fixed by configuration, never ranked on holdout data.",
             "Ideal QAOA simulation excludes hardware noise, queues, and calibration error.",
-            "Optimization and exact enumeration are deliberately limited to ten candidate assets.",
+            "Optimization and exact enumeration are deliberately limited to sixteen candidate assets.",
             "Local simulation uses a classical optimizer; no quantum speedup is claimed.",
             "Portfolio evaluation uses frictionless daily rebalancing; trading costs are excluded.",
         ],

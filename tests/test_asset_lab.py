@@ -14,6 +14,8 @@ from assetlab.data import align_returns, demo_prices, load_prices, ticker_list, 
 from assetlab.pipeline import run_study
 from assetlab.quantum import qiskit_circuit, simulate, statevector
 from assetlab.selection import binary_states, build_problem, problem_energies, solve_exact, summarize_counts
+from assetlab.comparison import measurement_comparison
+from assetlab.report import refresh_report
 
 
 def example_problem(n=4, choose=2):
@@ -31,6 +33,12 @@ def config():
 
 
 class SelectionTests(unittest.TestCase):
+    def test_expanded_candidate_limit_and_combination_count(self):
+        p = build_problem(np.eye(16), [f"A{i}" for i in range(16)], 8)
+        self.assertEqual(len(solve_exact(p)), 12870)
+        with self.assertRaisesRegex(ValueError, "2-16"):
+            build_problem(np.eye(17), [f"A{i}" for i in range(17)], 8)
+
     def test_qubo_and_ising_match_original_objective_for_every_state(self):
         for n in (3, 5, 6):
             for choose in (1, n - 1):
@@ -134,6 +142,49 @@ class QuantumTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_distribution_comparison_includes_invalid_shots_and_stronger_baseline(self):
+        p = build_problem(np.diag([1.0, 2.0]), ["A", "B"], 1)
+        q = {"probabilities": [0.25] * 4}
+        h = {"shots": 8, "histogram": [{"bitstring": "01", "count": 4}, {"bitstring": "10", "count": 4}]}
+        c = measurement_comparison(p, q, h)
+        self.assertEqual(c["feasible_fraction"], 1)
+        self.assertEqual(c["optimal_fraction"], 0.5)
+        self.assertEqual(c["ideal_feasible_probability"], 0.5)
+        self.assertEqual(c["uniform_legal_optimal_probability"], 0.5)
+        self.assertEqual(c["total_variation_distance"], 0.5)
+        self.assertAlmostEqual(c["feasible_mean_gap_percent"], 50)
+        self.assertEqual(c["cardinality"][1]["hardware"], 1)
+        h["histogram"][1] = {"bitstring": "00", "count": 4}
+        self.assertEqual(measurement_comparison(p, q, h)["feasible_fraction"], 0.5)
+        h["shots"] = 9
+        with self.assertRaisesRegex(ValueError, "shot count"):
+            measurement_comparison(p, q, h)
+
+    def test_local_benchmark_exports_cases_and_retains_parent_analysis(self):
+        from assetlab.benchmark import run_benchmark
+
+        with tempfile.TemporaryDirectory() as temp:
+            output, _ = run_study(config(), out=temp)
+            before = (output / "analysis.json").read_bytes()
+            folder, b = run_benchmark(output, sizes=[4], layers=[1, 2], seeds=[42], shots=256)
+            self.assertEqual(len(b["rows"]), 2)
+            self.assertTrue((folder / "results.csv").exists())
+            self.assertEqual((output / "analysis.json").read_bytes(), before)
+            for row in b["rows"]:
+                self.assertFalse(row["hardware_executed"])
+                self.assertEqual(row["legal_portfolios"], 6)
+                self.assertTrue((output / row["case_run"] / "problem.json").exists())
+                self.assertAlmostEqual(row["random_legal"]["expected_optimal_probability"], 1 / 6)
+            self.assertIn('"benchmark"', (output / "report.html").read_text())
+
+    def test_classical_greedy_swap_baseline_finds_known_diagonal_optimum(self):
+        from assetlab.benchmark import classical_baselines
+
+        p = build_problem(np.diag([0.01, 0.04, 0.09, 0.16]), ["A", "B", "C", "D"], 2)
+        result = classical_baselines(p, solve_exact(p), shots=128, seed=42)
+        self.assertEqual(result["greedy_swap"]["assets"], ["A", "B"])
+        self.assertAlmostEqual(result["greedy_swap"]["best_gap_percent"], 0)
+
     def test_holdout_changes_cannot_change_optimization_inputs(self):
         c = config()
         prices = demo_prices(c["tickers"], c["start"], c["end"], c["seed"])
@@ -165,6 +216,48 @@ class PipelineTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("qiskit_ibm_runtime"), "optional IBM dependency not installed")
 class IBMTests(unittest.TestCase):
+    def test_missing_credentials_have_actionable_error_without_exposing_values(self):
+        from qiskit_ibm_runtime.accounts.exceptions import AccountNotFoundError
+        import ibm_quantum
+
+        with patch.dict("os.environ", {"IBM_QUANTUM_API_KEY": "", "IBM_QUANTUM_INSTANCE": ""}), \
+             patch("qiskit_ibm_runtime.QiskitRuntimeService", side_effect=AccountNotFoundError("missing")):
+            with self.assertRaisesRegex(ValueError, "python ibm_quantum.py login"):
+                ibm_quantum.service()
+
+    def test_login_saves_credentials_without_connecting_or_printing_key(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import ibm_quantum
+
+        output = StringIO()
+        with patch("ibm_quantum.getpass", return_value="example-secret"), \
+             patch("builtins.input", return_value="crn:example:open-instance"), \
+             patch("qiskit_ibm_runtime.QiskitRuntimeService") as runtime, redirect_stdout(output):
+            self.assertEqual(ibm_quantum.main(["login"]), 0)
+            runtime.save_account.assert_called_once_with(
+                channel="ibm_quantum_platform", token="example-secret",
+                instance="crn:example:open-instance", set_as_default=True)
+            runtime.assert_not_called()
+        self.assertNotIn("example-secret", output.getvalue())
+
+    def test_login_rejects_instance_name_and_preserves_existing_credentials(self):
+        from qiskit_ibm_runtime.accounts.exceptions import AccountAlreadyExistsError
+        import ibm_quantum
+
+        with patch("ibm_quantum.getpass", return_value="example-secret"), \
+             patch("builtins.input", return_value="open-instance"), \
+             patch("qiskit_ibm_runtime.QiskitRuntimeService") as runtime:
+            with self.assertRaisesRegex(ValueError, "full instance CRN"):
+                ibm_quantum.login()
+            runtime.save_account.assert_not_called()
+        with patch("ibm_quantum.getpass", return_value="example-secret"), \
+             patch("builtins.input", return_value="crn:example:open-instance"), \
+             patch("qiskit_ibm_runtime.QiskitRuntimeService") as runtime:
+            runtime.save_account.side_effect = AccountAlreadyExistsError("exists")
+            with self.assertRaisesRegex(ValueError, "existing credentials were kept"):
+                ibm_quantum.login()
+
     def test_offline_preparation_and_duplicate_submission_protection(self):
         from qiskit.providers.fake_provider import GenericBackendV2
         from types import SimpleNamespace
@@ -189,6 +282,14 @@ class IBMTests(unittest.TestCase):
             result = json.loads((output / "ibm" / "hardware_results.json").read_text())
             self.assertEqual(result["shots"], 25)
             self.assertAlmostEqual(result["feasible_fraction"], 0.8)
+            report = (output / "report.html").read_text()
+            self.assertIn('"hardware"', report)
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(manifest["files_sha256"]["report.html"], hashlib.sha256((output / "report.html").read_bytes()).hexdigest())
+            self.assertTrue(manifest["report_updates"])
+            (output / "ibm" / "hardware_results.json").write_text(json.dumps({**result, "job_id": "wrong-job"}))
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                refresh_report(output)
 
     def test_uncertain_submission_is_not_automatically_retried(self):
         from qiskit.providers.fake_provider import GenericBackendV2

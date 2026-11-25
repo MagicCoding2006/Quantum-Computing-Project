@@ -14,9 +14,13 @@ from .selection import problem_energies, summarize_counts
 
 def statevector(problem, parameters):
     n = len(problem["tickers"])
+    energy = problem_energies(problem) / problem["phase_scale"]
+    return _evolve(n, energy, parameters)
+
+
+def _evolve(n, energy, parameters):
     if len(parameters) == 0 or len(parameters) % 2:
         raise ValueError("Parameters must be [gamma_0, beta_0, ...].")
-    energy = problem_energies(problem) / problem["phase_scale"]
     state = np.ones(1 << n, dtype=complex) / np.sqrt(1 << n)
     for gamma, beta in np.asarray(parameters).reshape(-1, 2):
         state *= np.exp(-1j * gamma * energy)
@@ -35,13 +39,13 @@ def simulate(problem, *, layers=1, shots=4096, seed=42):
     energy = problem_energies(problem) / problem["phase_scale"]
 
     def expectation(parameters):
-        return float(np.abs(statevector(problem, parameters)) ** 2 @ energy)
+        return float(np.abs(_evolve(len(problem["tickers"]), energy, parameters)) ** 2 @ energy)
 
     fit = differential_evolution(
         expectation, [(0, 2 * np.pi), (0, np.pi)] * layers,
         seed=seed, maxiter=60, popsize=8, polish=True, tol=1e-7,
     )
-    probabilities = np.abs(statevector(problem, fit.x)) ** 2
+    probabilities = np.abs(_evolve(len(problem["tickers"]), energy, fit.x)) ** 2
     probabilities /= probabilities.sum()
     samples = np.random.default_rng(seed).multinomial(shots, probabilities)
     counts = {i: int(c) for i, c in enumerate(samples) if c}

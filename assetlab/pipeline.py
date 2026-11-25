@@ -36,7 +36,7 @@ def write_json(path, value):
 
 def code_provenance():
     root = Path(__file__).resolve().parent.parent
-    files = [root / "asset_lab.py", root / "trade_lab.py", root / "ibm_quantum.py", root / "benchmark_asset_lab.py", root / "quantum_search.py", root / "requirements.txt"]
+    files = [root / name for name in ("asset_lab.py", "trade_lab.py", "ibm_quantum.py", "benchmark_asset_lab.py", "quantum_search.py", "grover_lab.py", "requirements.txt", "requirements-quantum.txt", "requirements-noise.txt")]
     files += sorted((root / "assetlab").glob("*.py"))
     files += sorted((root / "assetlab").glob("*.html"))
     hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -47,7 +47,7 @@ def code_provenance():
     except (OSError, subprocess.CalledProcessError):
         commit, dirty = None, None
     packages = {}
-    for name in ("numpy", "pandas", "scipy", "statsmodels", "yfinance", "qiskit", "qiskit-ibm-runtime"):
+    for name in ("numpy", "pandas", "scipy", "statsmodels", "yfinance", "qiskit", "qiskit-ibm-runtime", "qiskit-aer"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:

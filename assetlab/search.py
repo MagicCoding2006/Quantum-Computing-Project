@@ -5,13 +5,15 @@ sum from observations. It never accepts a precomputed list of winning rules.
 This is a feasibility experiment, not a forecast or a complete trading ledger.
 """
 
+import hashlib
+import json
 import math
 import time
 
 import numpy as np
 
 
-def search_problem(features, scores, *, min_support=2, min_score=1, names=None):
+def search_problem(features, scores, *, min_support=2, min_score=1, names=None, implementation="optimized"):
     values = np.asarray(features)
     raw_scores = np.asarray(scores, dtype=float)
     if values.ndim != 2 or not 1 <= values.shape[1] <= 64 or not 1 <= len(values) <= 256:
@@ -36,8 +38,8 @@ def search_problem(features, scores, *, min_support=2, min_score=1, names=None):
     max_encoded_score = offset + sum(value for value in scores if value > 0)
     count_bits = len(values).bit_length()
     score_bits = max(1, max_encoded_score.bit_length())
-    return {
-        "schema_version": 1, "kind": "grover_rule_threshold", "condition_names": names,
+    problem = {
+        "schema_version": 2, "kind": "grover_rule_threshold", "condition_names": names,
         "episode_masks": masks, "episode_scores": scores,
         "min_support": min_support, "min_score": min_score,
         "score_offset": offset, "support_bits": count_bits, "score_bits": score_bits,
@@ -47,6 +49,62 @@ def search_problem(features, scores, *, min_support=2, min_score=1, names=None):
         "predicate": "episode_count >= min_support AND sum(quantized_net_episode_return) >= min_score",
         "limitations": "Training-only aggregate return sum; no drawdown, risk normalization, or forward profitability claim.",
     }
+    predicate = {key: problem[key] for key in ("condition_names", "episode_masks", "episode_scores", "min_support", "min_score")}
+    problem["predicate_sha256"] = hashlib.sha256(json.dumps(predicate, sort_keys=True).encode()).hexdigest()
+    return with_encoding(problem, implementation)
+
+
+def encoding_plan(problem, implementation=None):
+    implementation = implementation or problem.get("implementation", "baseline")
+    if implementation not in {"baseline", "optimized"}:
+        raise ValueError("Choose baseline or optimized oracle implementation.")
+    rows = [{"mask": mask, "support": 1, "score": score}
+            for mask, score in zip(problem["episode_masks"], problem["episode_scores"])]
+    constant_support, constant_score = 0, 0
+    grouped_count = len(rows)
+    support_factor, score_factor = 1, 1
+    if implementation == "optimized":
+        groups = {}
+        for row in rows:
+            group = groups.setdefault(row["mask"], {"mask": row["mask"], "support": 0, "score": 0})
+            group["support"] += row["support"]
+            group["score"] += row["score"]
+        grouped_count = len(groups)
+        full_mask = (1 << problem["search_qubits"]) - 1
+        always = groups.pop(full_mask, {"support": 0, "score": 0})
+        constant_support, constant_score = always["support"], always["score"]
+        rows = list(groups.values())
+        support_factor = math.gcd(*(r["support"] for r in rows)) or 1
+        score_factor = math.gcd(*(abs(r["score"]) for r in rows)) or 1
+        rows = [{"mask": r["mask"], "support": r["support"] // support_factor,
+                 "score": r["score"] // score_factor} for r in rows]
+    support_threshold = -(-(problem["min_support"] - constant_support) // support_factor)
+    score_threshold = -(-(problem["min_score"] - constant_score) // score_factor)
+    offset = sum(-r["score"] for r in rows if r["score"] < 0)
+    score_max = offset + sum(r["score"] for r in rows if r["score"] > 0)
+    support_bits = max(1, sum(r["support"] for r in rows).bit_length())
+    score_bits = max(1, score_max.bit_length())
+    flags = 3 if implementation == "baseline" else 1
+    return {"implementation": implementation, "groups": rows,
+            "original_episode_count": len(problem["episode_masks"]), "grouped_observations": grouped_count,
+            "dynamic_groups": len(rows), "constant_support": constant_support, "constant_score": constant_score,
+            "support_factor": support_factor, "score_factor": score_factor,
+            "support_threshold": support_threshold, "score_threshold": offset + score_threshold,
+            "score_offset": offset, "support_bits": support_bits, "score_bits": score_bits,
+            "workspace_qubits": support_bits + score_bits + flags,
+            "total_qubits": problem["search_qubits"] + support_bits + score_bits + flags,
+            "arithmetic": "reversible carry increments" if implementation == "baseline" else "exact Fourier additions; no QFT approximation"}
+
+
+def with_encoding(problem, implementation):
+    """Change the circuit representation, preserving every input and threshold."""
+    result = dict(problem)
+    plan = encoding_plan(problem, implementation)
+    result["implementation"] = implementation
+    result["encoding"] = plan
+    for key in ("support_bits", "score_bits", "score_offset", "workspace_qubits", "total_qubits"):
+        result[key] = plan[key]
+    return result
 
 
 def evaluate_rule(problem, mask):
@@ -185,34 +243,92 @@ def _controlled_add(circuit, register, control, value):
             circuit.cx(control, register[start])
 
 
-def _toggle_at_least(circuit, register, threshold, flag):
+def _at_least_patterns(register, threshold):
+    """Disjoint binary prefixes for an unsigned >= comparison."""
     if threshold <= 0:
-        circuit.x(flag)
+        yield [], []
         return
     if threshold >= 1 << len(register):
         return
     prefix, values = [], []
-    # Disjoint binary prefixes cover x > threshold; equality is the final term.
     for bit in range(len(register) - 1, -1, -1):
         value = (threshold >> bit) & 1
         if not value:
-            _toggle_pattern(circuit, [*prefix, register[bit]], [*values, 1], flag)
+            yield [*prefix, register[bit]], [*values, 1]
         prefix.append(register[bit])
         values.append(value)
-    _toggle_pattern(circuit, prefix, values, flag)
+    yield prefix, values
+
+
+def _toggle_at_least(circuit, register, threshold, flag):
+    for controls, values in _at_least_patterns(register, threshold):
+        _toggle_pattern(circuit, controls, values, flag)
+
+
+def _fourier_add(circuit, register, value, control=None):
+    for bit, qubit in enumerate(register):
+        modulus = 1 << (len(register) - bit)
+        residue = value % modulus
+        if residue:
+            angle = 2 * math.pi * residue / modulus
+            if control is None:
+                circuit.p(angle, qubit)
+            else:
+                circuit.cp(angle, control, qubit)
+
+
+def _phase_pattern(circuit, controls, values):
+    zeros = [q for q, value in zip(controls, values) if not value]
+    if zeros:
+        circuit.x(zeros)
+    if len(controls) == 1:
+        circuit.z(controls[0])
+    else:
+        circuit.h(controls[-1])
+        circuit.mcx(controls[:-1], controls[-1])
+        circuit.h(controls[-1])
+    if zeros:
+        circuit.x(zeros)
 
 
 def phase_oracle(problem):
     """Build compute/mark/uncompute from observations, not from known solutions."""
     from qiskit import QuantumCircuit
 
+    plan = encoding_plan(problem)
     n = problem["search_qubits"]
-    count = list(range(n, n + problem["support_bits"]))
-    score = list(range(count[-1] + 1, count[-1] + 1 + problem["score_bits"]))
+    count = list(range(n, n + plan["support_bits"]))
+    score = list(range(count[-1] + 1, count[-1] + 1 + plan["score_bits"]))
+    if plan["implementation"] == "optimized":
+        from qiskit.circuit.library import QFTGate
+
+        event = score[-1] + 1
+        compute = QuantumCircuit(plan["total_qubits"], name="fourier_episode_scores")
+        compute.h([*count, *score])  # F|0> for each register.
+        _fourier_add(compute, score, plan["score_offset"])
+        for row in plan["groups"]:
+            controls = [bit for bit in range(n) if not (row["mask"] >> bit) & 1]
+            _toggle_pattern(compute, controls, [0] * len(controls), event)
+            _fourier_add(compute, count, row["support"], event)
+            _fourier_add(compute, score, row["score"], event)
+            _toggle_pattern(compute, controls, [0] * len(controls), event)
+        compute.append(QFTGate(len(count)).inverse(), count)
+        compute.append(QFTGate(len(score)).inverse(), score)
+        support_check = QuantumCircuit(plan["total_qubits"])
+        _toggle_at_least(support_check, count, plan["support_threshold"], event)
+        oracle = QuantumCircuit(plan["total_qubits"], name="optimized_rule_phase_oracle")
+        oracle.compose(compute, inplace=True)
+        oracle.compose(support_check, inplace=True)
+        for controls, values in _at_least_patterns(score, plan["score_threshold"]):
+            _phase_pattern(oracle, [event, *controls], [1, *values])
+        oracle.compose(support_check.inverse(), inplace=True)
+        oracle.compose(compute.inverse(), inplace=True)
+        return oracle
+
     event, support_ok, score_ok = range(score[-1] + 1, score[-1] + 4)
-    compute = QuantumCircuit(problem["total_qubits"], name="episode_scores")
+    compute = QuantumCircuit(plan["total_qubits"], name="episode_scores")
     for bit, qubit in enumerate(score):
-        if (problem["score_offset"] >> bit) & 1:
+        if (plan["score_offset"] >> bit) & 1:
             compute.x(qubit)
     for row, value in zip(problem["episode_masks"], problem["episode_scores"]):
         # A rule fires iff none of its selected conditions is false in this row.
@@ -221,10 +337,10 @@ def phase_oracle(problem):
         _controlled_add(compute, count, event, 1)
         _controlled_add(compute, score, event, value)
         _toggle_pattern(compute, controls, [0] * len(controls), event)
-    compare = QuantumCircuit(problem["total_qubits"], name="thresholds")
-    _toggle_at_least(compare, count, problem["min_support"], support_ok)
-    _toggle_at_least(compare, score, problem["score_offset"] + problem["min_score"], score_ok)
-    oracle = QuantumCircuit(problem["total_qubits"], name="rule_phase_oracle")
+    compare = QuantumCircuit(plan["total_qubits"], name="thresholds")
+    _toggle_at_least(compare, count, plan["support_threshold"], support_ok)
+    _toggle_at_least(compare, score, plan["score_threshold"], score_ok)
+    oracle = QuantumCircuit(plan["total_qubits"], name="rule_phase_oracle")
     oracle.compose(compute, inplace=True)
     oracle.compose(compare, inplace=True)
     oracle.cz(support_ok, score_ok)
@@ -239,7 +355,7 @@ def grover_circuit(problem, iterations=1, *, measure=True):
     if not isinstance(iterations, int) or not 0 <= iterations <= 32:
         raise ValueError("Offline circuit export supports 0-32 Grover iterations.")
     n = problem["search_qubits"]
-    circuit = QuantumCircuit(problem["total_qubits"], n if measure else 0)
+    circuit = QuantumCircuit(encoding_plan(problem)["total_qubits"], n if measure else 0)
     circuit.h(range(n))
     oracle = phase_oracle(problem) if iterations else None
     for _ in range(iterations):

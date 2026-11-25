@@ -1,0 +1,2 @@
+# Optional local quantum trajectory simulations; never uses IBM allocation.
+qiskit-aer>=0.17,<1

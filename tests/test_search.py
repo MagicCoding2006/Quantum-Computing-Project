@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 
 from assetlab.search import (classical_reference, coverage_reference, evaluate_rule, grover_circuit,
-                            ideal_search, phase_oracle, scaling_table, search_problem)
+                            ideal_search, phase_oracle, scaling_table, search_problem,
+                            compiled_resources, with_encoding)
 from quantum_search import main, price_episodes
 
 
@@ -57,6 +58,10 @@ class SearchReferenceTests(unittest.TestCase):
             prices.to_csv(source)
             end = dates[100].date().isoformat()
             first, names = price_episodes(source, training_end=end, episodes=4)
+            selected, selected_names = price_episodes(source, training_end=end, episodes=4,
+                feature_assets=['QQQ', 'UNUSED_MISSING_ASSET'], conditions=8)
+            self.assertEqual(len(selected_names), 8)
+            pd.testing.assert_frame_equal(first, selected[first.columns])
             prices.loc[prices.index > dates[100]] *= 1000
             prices.to_csv(source)
             second, _ = price_episodes(source, training_end=end, episodes=4)
@@ -72,6 +77,43 @@ class SearchReferenceTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('qiskit'), 'optional Qiskit dependency')
 class ReversibleOracleTests(unittest.TestCase):
+    def test_both_encodings_match_the_predicate_on_superpositions_with_clean_workspace(self):
+        from qiskit import QuantumCircuit
+        from qiskit.quantum_info import Statevector
+
+        fixtures = [
+            ([[1, 0], [1, 0], [0, 1], [0, 1]], [2, -2, 4, 2], 3, 3),
+            ([[1, 1], [1, 0], [1, 0], [0, 1]], [5, -2, -2, 2], 2, 2),
+            ([[1, 1], [1, 1]], [-2, 3], 1, 0),
+            ([[1, 0], [1, 0], [0, 1], [0, 1]], [-2, -2, -4, -2], 1, -5),
+        ]
+        rng = np.random.default_rng(121)
+        for _ in range(4):
+            fixtures.append((rng.integers(0, 2, (4, 3)), rng.integers(-3, 4, 4), 2, 1))
+        for features, scores, support, threshold in fixtures:
+            p = search_problem(features, scores, min_support=support, min_score=threshold)
+            n = p['search_qubits']
+            for implementation in ('baseline', 'optimized'):
+                with self.subTest(features=features, implementation=implementation):
+                    encoded = with_encoding(p, implementation)
+                    self.assertEqual(encoded['predicate_sha256'], p['predicate_sha256'])
+                    circuit = QuantumCircuit(encoded['total_qubits'])
+                    circuit.h(range(n))
+                    circuit.compose(phase_oracle(encoded), inplace=True)
+                    actual = Statevector.from_instruction(circuit).data
+                    expected = np.zeros_like(actual)
+                    expected[:1 << n] = [(-1 if evaluate_rule(p, mask)[2] else 1) / np.sqrt(1 << n)
+                                               for mask in range(1 << n)]
+                    np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+    def test_user_demo_reduces_workspace_and_compiled_two_qubit_gates(self):
+        rng = np.random.default_rng(42)
+        p = search_problem(rng.integers(0, 2, (8, 4)), [2, -1, 1, -2, 3, -1, 2, -1])
+        old = compiled_resources(phase_oracle(with_encoding(p, 'baseline')))
+        new = compiled_resources(phase_oracle(p))
+        self.assertLess(new['qubits'], old['qubits'])
+        self.assertLess(new['cx_gates'], old['cx_gates'])
+
     def test_oracle_marks_correct_phase_and_cleans_workspace_for_every_basis_rule(self):
         from qiskit import QuantumCircuit
         from qiskit.quantum_info import Statevector
@@ -120,6 +162,35 @@ class ReversibleOracleTests(unittest.TestCase):
             manifest = json.loads((folder/'manifest.json').read_text())
             self.assertIn('grover.qpy', manifest['files_sha256'])
             self.assertIn('quantum_search.py', manifest['code']['source_sha256'])
+
+    def test_market_scaling_benchmark_uses_fixed_cases_and_matching_predicates(self):
+        dates = pd.bdate_range('2020-01-01', periods=100)
+        rng = np.random.default_rng(53)
+        prices = pd.DataFrame(100*np.exp(np.cumsum(rng.normal(0, .01, (100, 3)), axis=0)),
+                              index=dates, columns=['SPY', 'QQQ', 'IWM'])
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp)/'prices.csv'
+            prices.to_csv(source)
+            status = main(['--benchmark', '--prices', str(source), '--training-end', '2020-05-15',
+                '--feature-assets', 'QQQ', 'IWM', '--condition-sizes', '6', '8',
+                '--episode-sizes', '2', '4', '--min-support', '1', '--out', str(Path(temp)/'output')])
+            self.assertEqual(status, 0)
+            folder = next((Path(temp)/'output/benchmarks').iterdir())
+            summary = json.loads((folder/'summary.json').read_text())
+            self.assertEqual(len(summary['cases']), 4)
+            self.assertFalse(summary['hardware_executed'])
+            for case in summary['cases']:
+                audit = json.loads((folder/case['path']/'audit.json').read_text())
+                implementations = audit['implementations']
+                self.assertEqual(implementations['baseline']['predicate_sha256'],
+                                 implementations['optimized']['predicate_sha256'])
+                frame = pd.read_csv(folder/case['path']/'episodes.csv')
+                self.assertEqual(len(frame), case['episodes'])
+                self.assertTrue((frame['exit_date'] <= summary['training_end']).all())
+            # More conditions use the same episode decisions and outcomes.
+            small = pd.read_csv(folder/'conditions_6_episodes_4/episodes.csv')
+            large = pd.read_csv(folder/'conditions_8_episodes_4/episodes.csv')
+            pd.testing.assert_frame_equal(small, large[small.columns])
 
 
 if __name__ == '__main__':

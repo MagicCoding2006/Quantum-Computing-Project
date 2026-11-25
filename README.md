@@ -18,13 +18,15 @@ backtester, cost comparisons, a timestamped forward candidate journal, and a
 small quantum trade-selection experiment. `quantum_search.py` now adds an
 offline Grover rule-search feasibility prototype. Validated signal discovery
 remains a research goal; the trade selector does not implement signal learning.
+`grover_lab.py` adds frozen comparison protocols, local noise sampling,
+device-native IBM planning, explicit batch submission, and a visual results report.
 
 ## Known problems and research gaps
 
 These findings describe the saved experiments as of November 25, 2026. They
 do not establish that quantum methods generally fail at market research.
 
-### Latest hardware experiment
+### QAOA trade-selection hardware experiment
 
 The historical example uses the June 6, 2014 signal for EFA and XLV. Two asset
 decision bits and two unused-slot bits make four qubits, representing only four
@@ -66,8 +68,10 @@ Generated results are ignored by Git, so these links require the original run.
 3. **The benchmark is too small to demonstrate a computational need for QC.**
    Four choices are trivial to enumerate. Ten qubits have 1,024 state amplitudes,
    so a small ideal circuit can also be simulated classically. The current local
-   implementation caps experiments at 16 total qubits and uses enumeration and
-   statevectors. More assets or a larger backend alone do not establish value.
+   QAOA implementation caps experiments at 16 total qubits and uses enumeration
+   and statevectors. The Grover path has separate compilation and simulation
+   bounds described below. More assets or a larger backend alone do not
+   establish value.
 4. **Optimizing this score is not evidence of trading profit.** The convergence
    score assumes a stationary peer basket and is not a calibrated return
    forecast. The hardware example does not evaluate subsequent realized P&L or
@@ -93,6 +97,12 @@ Generated results are ignored by Git, so these links require the original run.
    observations, without persistent account positions, paper fills, scheduling,
    or forward realized P&L. Those are still required to test an eventual signal
    as a trading system.
+9. **The cheaper Grover oracle still failed to amplify on IBM in the first
+   matched test.** Job `dc3ippdhdvas73bo0ckg` returned 24.61% passing shots for the
+   baseline and 25.39% for the optimized circuit at one iteration, compared with
+   31.25% for uniform random rule sampling. The observed difference between
+   implementations is small at 256 shots per circuit. Fewer compiled gates have
+   not yet produced usable hardware amplification or a market discovery.
 
 ## Revised objective: quantum-assisted signal discovery
 
@@ -112,7 +122,7 @@ The search path now has an offline feasibility prototype:
 
 ```bash
 python -m pip install -r requirements-quantum.txt
-python quantum_search.py --demo
+python quantum_search.py --demo --compare-baseline
 ```
 
 To construct its inputs from an existing adjusted-price snapshot:
@@ -153,6 +163,25 @@ with one integer `score_units` outcome per row. That input must already account
 for execution, costs, and training boundaries; price-specific flags apply only
 to `--prices`.
 
+The default `--implementation optimized` preserves the exact integer predicate
+while reducing circuit cost:
+
+- Identical observed condition rows share one eligibility check. Their support
+  counts and signed scores are combined, including cancellation.
+- Observations whose conditions are all true contribute known constants. Common
+  integer factors reduce register widths, with thresholds adjusted exactly.
+  Neither step changes score quantization or which rules pass.
+- Exact Fourier additions replace repeated carry-based additions. No QFT
+  rotations are dropped. See the [Qiskit QFT definition](https://quantum.cloud.ibm.com/docs/en/api/qiskit/qiskit.circuit.library.QFTGate).
+- The eligibility qubit is reused for support checking; the score threshold
+  applies a phase directly, removing two separate flag qubits.
+
+`--implementation baseline` retains the original carry-based circuit.
+`--compare-baseline` reports its resources beside the selected implementation.
+Saved problems record the implementation, register plan, and a predicate hash
+that stays the same between representations. Old problem files without an
+implementation field retain their original baseline interpretation.
+
 Every run saves `episodes.csv`, `problem.json`, `audit.json`, provenance, and,
 for bounded cases, a complete `grover.qpy` / `grover.qasm` circuit under
 `results_asset_lab/search/`. The audit reports:
@@ -173,14 +202,15 @@ for bounded cases, a complete `grover.qpy` / `grover.qasm` circuit under
   validation; an unknown-solution search must account for learning or handling
   an unknown marked fraction.
 
-Compilation/export is capped at 12 conditions, 16 episodes, and 12 score bits;
+Compilation is capped at 20 conditions, 64 episodes, and 16 score bits;
 exhaustive classical diagnostics stop above 20 conditions. Larger allowed
 inputs still get a register-size plan without an exponential statevector or
-precomputed answer table. This command submits no job, spends no QPU allocation,
-and does not change the trading ledger. Its files use a distinct experiment
+precomputed answer table. Circuit export also stops when the requested oracle
+repetitions exceed an estimated 200,000 CX gates. This command submits no job,
+spends no QPU allocation, and does not change the trading ledger. Its files use a distinct experiment
 schema; the existing QAOA `ibm_quantum.py submit` command does not accept them.
 
-The first saved-price audit used six conditions and eight historical episodes:
+The original saved-price audit used six conditions and eight historical episodes:
 **20 total qubits, 4,043 CX gates, and depth 9,090 per oracle** in the reference
 compilation. Classical scoring found 17 passing rules among 64 in about 34
 microseconds; merging equivalent rules left just 20 distinct firing sets. This
@@ -190,6 +220,176 @@ but 17.70% after two: amplification can overshoot even without hardware noise.
 These probabilities are mathematical diagnostics using the classically known
 marked count, not QPU results. Evidence:
 [`audit.json`](results_asset_lab/search/20261125T180633Z-827b39dd/audit.json).
+
+The optimized version reduces that same market oracle from **20 to 18 qubits**,
+**4,043 to 1,004 CX gates**, and **depth 9,090 to 1,930**. The synthetic demo
+reduces from 15 to 12 qubits and 1,397 to 505 CX gates. These are reference
+compilation improvements, not measured QPU accuracy or trading performance.
+Tiny inputs can trade a few extra gates for lower workspace, so resource
+improvements should be checked per case rather than assumed universal.
+
+### Benchmark larger cases using saved market data
+
+```bash
+python quantum_search.py --benchmark \
+  --prices results_asset_lab/trading/YOUR_TRADING_RUN/prices.csv \
+  --training-end 2021-12-31 \
+  --condition-sizes 6 10 14 \
+  --episode-sizes 8 16 32
+```
+
+This runs both encodings on the same predicate for each grid case, saves
+`comparison.csv`, `summary.json`, per-case input/predicate/resource snapshots,
+and a manifest under `results_asset_lab/search/benchmarks/`. The condition order
+is fixed before looking at outcomes. By default the benchmark adds indicators
+from QQQ, IWM, TLT, IEF, and GLD to the original SPY observations. These supply
+positive 1-, 5-, and 20-session returns, price versus its 20-session mean, and
+5- versus 20-session volatility; the already-present QQQ 5-session return is
+not duplicated. `--feature-assets` changes this declared list. Each case uses
+the first requested conditions and chronological episodes, so larger cases
+retain the smaller cases' observations and target returns.
+
+For a single expanded circuit, use `--feature-assets QQQ IWM TLT IEF GLD`,
+`--conditions 14`, and `--episodes 32` with `--prices`. The benchmark can extend
+to `--condition-sizes 6 10 14 18 20 --episode-sizes 8 16 32 64`. Above the
+compilation bounds it records register plans and skips circuit synthesis.
+Increasing the candidate family or training sample changes the research
+problem; the baseline/optimized comparison within each case keeps it fixed.
+These experiments remain exploratory training searches, with no untouched-test
+or forward-profit claim. Classical timings are individual observations, not
+controlled end-to-end speed comparisons with a QPU.
+
+The saved 20-case market grid covers 6, 10, 14, 18, and 20 conditions with 8,
+16, 32, and 64 episodes. Observed oracle CX reductions range from 52.58% to
+94.94%, with two to four fewer qubits:
+
+| Conditions / episodes | Qubits, baseline -> optimized | CX gates, baseline -> optimized | Depth, baseline -> optimized |
+| --- | --- | --- | --- |
+| 6 / 8 | 20 -> 18 | 4,043 -> 1,004 | 9,090 -> 1,930 |
+| 14 / 32 | 32 -> 28 | 27,281 -> 5,323 | 62,560 -> 12,230 |
+| 20 / 64 | 40 -> 38 | 74,047 -> 20,513 | 170,736 -> 46,966 |
+
+The largest case has 1,048,576 encoded rules, but 154,017 pass this exploratory
+predicate and only 2,523 distinct episode firing sets exist. This remains an
+easy structured classical search, not evidence of a quantum advantage. The
+large marked fraction also makes random search far easier than scanning every
+encoding. The 64 episodes span February 2, 2010 through November 16, 2012;
+`--training-end 2021-12-31` is an upper cutoff, not a claim that all intervening
+data was used. Improving an oracle is useful engineering progress, separate
+from finding a difficult, economically meaningful search task.
+Saved comparisons:
+[`comparison.csv`](results_asset_lab/search/benchmarks/20261125T182642Z-14c6dbe8/comparison.csv)
+and [`summary.json`](results_asset_lab/search/benchmarks/20261125T182642Z-14c6dbe8/summary.json).
+
+### Compare ideal, noisy, and actual IBM results
+
+Freeze a small search audit into a new experiment before collecting results:
+
+```bash
+python -m pip install -r requirements-noise.txt
+python grover_lab.py prepare \
+  --run results_asset_lab/search/YOUR_SEARCH_AUDIT \
+  --iterations 0 1 2 --shots 256 --simulate --open
+```
+
+Preparation saves a fixed predicate, both encodings, shot counts, seeds, noise
+parameters, original input evidence, and checksummed measurement circuits in
+`experiments/` under the source audit. It compares baseline and optimized
+circuits at each requested iteration count. The zero-iteration circuits are
+controls. `--simulate` samples ideal circuits and then an illustrative local
+noise model. It never submits an IBM job. If the environment has no pip, use
+`uv pip install --python .venv/bin/python -r requirements-noise.txt` instead.
+
+The default noise model uses a CX depolarizing parameter of 0.001, an SX/X
+parameter of 0.0001, and symmetric readout flips of 0.01. RZ errors are zero.
+These are declared hypothetical parameters, not IBM calibration measurements;
+relaxation, crosstalk, and drift are absent. The depolarizing parameter follows
+[Qiskit Aer's channel definition](https://qiskit.github.io/qiskit-aer/stubs/qiskit_aer.noise.depolarizing_error.html).
+
+Comparison preparation supports up to 20 conditions, 64 episodes, and 16 score
+bits per encoding. Local statevector noise sampling is separately limited to
+18 logical qubits, 512 MB, and two CPU threads. A larger protocol can be
+prepared without `--simulate` and planned for hardware. This simulation bound
+does not restrict the physical qubit count of an IBM backend.
+
+For a **new, unsubmitted** experiment, use its printed folder:
+
+```bash
+python grover_lab.py plan --experiment YOUR_EXPERIMENT_FOLDER --backend ibm_kingston
+```
+
+Planning connects to IBM and compiles for the chosen device without submitting
+a QPU workload. Its printed submission command names the frozen native plan:
+
+```bash
+python grover_lab.py submit --experiment YOUR_EXPERIMENT_FOLDER --plan YOUR_NATIVE_PLAN_FOLDER --max-execution-seconds 60
+python grover_lab.py collect --experiment YOUR_EXPERIMENT_FOLDER --open
+```
+
+To check the same device-native circuits without hardware noise, run:
+
+```bash
+python grover_lab.py verify --experiment YOUR_EXPERIMENT_FOLDER --plan YOUR_NATIVE_PLAN_FOLDER --iterations 1
+```
+
+This removes idle physical wires while preserving classical measurement order,
+then uses ideal matrix-product-state simulation at numerical tolerance 1e-16,
+without a bond-dimension cap. It is a compilation/decoding check, not evidence
+that the workload is classically hard or profitable.
+
+Submission uses the protocol's fixed shots per circuit in one Sampler job.
+The attempt is recorded before contacting the submission endpoint, and a
+second attempt for that experiment is refused. Reconcile uncertain submissions
+in the IBM dashboard. Collection checks status once; queued jobs do not leave
+a waiting worker. Completed counts automatically update `report.html`.
+Saved credentials from `ibm_quantum.py login` are reused. See
+[IBM's Sampler interface](https://quantum.cloud.ibm.com/docs/en/api/qiskit-ibm-runtime/server-side-sampler-sampler-v2).
+
+The report distinguishes ideal formulas, ideal sampled counts, synthetic noise,
+and actual IBM measurements. The primary passing fraction includes **all**
+shots. Workspace is measured too, and its zero rate and distribution distance
+are separate diagnostics. Never discard bad workspace measurements to make
+the primary result look better. Wilson intervals assume independent shots;
+they do not correct for device drift or multiple comparisons. A noisy circuit
+can increase passing frequency at a deliberately overshot iteration while
+still moving its full distribution further from ideal.
+
+The first six-circuit test used the synthetic four-condition demo. Each circuit
+had 256 shots, with fixed iterations 0, 1, and 2. IBM job
+`dc3ippdhdvas73bo0ckg` completed on `ibm_kingston` with a 60-second execution cap.
+At **one iteration**:
+
+| Source | Baseline passing fraction | Optimized passing fraction |
+| --- | --- | --- |
+| Ideal formula | 95.70% | 95.70% |
+| Ideal sampled locally | 97.27% | 97.27% |
+| Native circuits sampled without noise | 96.88% | 96.48% |
+| Synthetic noise scenario | 52.34% | 69.92% |
+| Actual IBM hardware | 24.61% | 25.39% |
+
+IBM-native two-qubit counts were 3,268 versus 1,059, and depths were 8,283
+versus 2,645. Despite that reduction, only 0/256 baseline and 1/256 optimized
+shots had zero workspace at one iteration. The simplified noise model was
+too optimistic for this hardware workload. Uniform rule sampling passes with
+31.25% probability in this demo; the hardware test has not established useful
+amplification or an advantage over classical search.
+Noiseless checks of the exact native circuits returned zero workspace on all
+shots, supporting the compilation and measurement logic. The hardware loss
+therefore points to execution effects; this experiment does not isolate which
+noise, calibration, placement, or duration effect dominates. IBM reported
+3 charged QPU seconds and 0.040096 resource units for the six-circuit job.
+
+Evidence and plots:
+[`comparison report`](results_asset_lab/search/20261125T183000Z-96c3b272/experiments/20261125T183720Z-4e9adb8a/report.html),
+[`hardware counts`](results_asset_lab/search/20261125T183000Z-96c3b272/experiments/20261125T183720Z-4e9adb8a/ibm/hardware_results.json).
+
+Two additional exploratory market probes were retained as local controls:
+three conditions/four episodes had all 8 rules passing; six conditions/four
+episodes had 32 of 64 passing. The first has no search target, and the second
+has ideal success 50% at every integer iteration of standard pi-phase Grover.
+Neither demonstrates an amplification benefit. Input selection and additional
+threshold trials must remain visible rather than reporting only a favorable
+search instance.
 
 **Scaling has to follow an algorithmic advantage.** Grover reduces unstructured
 search from order `N/M` classical checks to order `sqrt(N/M)` coherent oracle
@@ -203,9 +403,10 @@ More coherent depth can amplify a signal with the right algorithm, but it also
 accumulates errors. See [IBM's Grover explanation](https://quantum.cloud.ibm.com/learning/en/modules/computer-science/grovers)
 and its [circuit-depth discussion](https://eu-de.quantum.cloud.ibm.com/docs/en/tutorials/grovers-algorithm).
 
-The next gate is to reduce the measured oracle/workspace cost, test increasing
-rule sizes against strong classical methods, and measure the success curve on
-hardware where depth permits. A practical advantage requires saved search
+The next gate is to find a substantially shallower operation that preserves a
+useful signal on hardware. The optimized market-rule oracle still failed that
+check, so increasing its shots or dataset alone is not a demonstrated remedy.
+A practical advantage requires saved search
 queries to outweigh oracle construction, coherent arithmetic, noise handling,
 and the best classical use of the same problem structure. Adding candidates
 alone does not establish that crossover. Broader search also creates more

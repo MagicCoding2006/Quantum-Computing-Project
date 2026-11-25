@@ -36,7 +36,7 @@ def write_json(path, value):
 
 def code_provenance():
     root = Path(__file__).resolve().parent.parent
-    files = [root / "asset_lab.py", root / "trade_lab.py", root / "ibm_quantum.py", root / "benchmark_asset_lab.py", root / "requirements.txt"]
+    files = [root / "asset_lab.py", root / "trade_lab.py", root / "ibm_quantum.py", root / "benchmark_asset_lab.py", root / "quantum_search.py", root / "requirements.txt"]
     files += sorted((root / "assetlab").glob("*.py"))
     files += sorted((root / "assetlab").glob("*.html"))
     hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()

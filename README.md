@@ -8,10 +8,295 @@ interactive HTML report and a reproducible data snapshot.
 The original checklist scanner remains available below. It answers a different
 question: which combinations of conditions preceded large stock gains?
 
-The profit-focused research path now starts with `trade_lab.py`: a long-only
-relative-value backtester, cost comparisons, and a timestamped forward
-candidate journal. Quantum optimization remains a separate benchmark; the
-trading module makes no quantum or live-profit claim.
+The research goal is to discover a reproducible market signal, profitable after
+costs, using quantum methods, and measure what those methods contribute beyond
+classical alternatives. Finding a profitable classical strategy first is not a
+prerequisite. Classical methods are comparison controls throughout discovery.
+
+The current implementation provides `trade_lab.py`: a long-only relative-value
+backtester, cost comparisons, a timestamped forward candidate journal, and a
+small quantum trade-selection experiment. `quantum_search.py` now adds an
+offline Grover rule-search feasibility prototype. Validated signal discovery
+remains a research goal; the trade selector does not implement signal learning.
+
+## Known problems and research gaps
+
+These findings describe the saved experiments as of November 25, 2026. They
+do not establish that quantum methods generally fail at market research.
+
+### Latest hardware experiment
+
+The historical example uses the June 6, 2014 signal for EFA and XLV. Two asset
+decision bits and two unused-slot bits make four qubits, representing only four
+valid economic choices: cash, EFA, XLV, or both. The model optimum is both.
+IBM job `dc37e06q4uuc73a6e330` ran on `ibm_kingston` with 4,096 shots.
+
+| Method | Result on the specified model |
+| --- | --- |
+| Exact classical enumeration | Checks all four valid choices and returns the optimum |
+| Uniform random sampling of valid choices | 25% optimum probability per draw, analytically |
+| Ideal QAOA simulated on a CPU | 12.87% optimum samples; 48.14% valid samples, out of 4,096 |
+| IBM QAOA hardware | 9.69% optimum shots; 46.02% valid shots, out of 4,096 |
+
+The percentages count all generated samples, including invalid ones. Both QAOA
+runs contained the optimum, so selecting their best measured valid result
+returns the same answer as enumeration. These per-draw rates do not establish
+an advantage in final answers, runtime, or money made. Comparing complete runs
+requires budgets and overhead as well as sample quality. The ideal simulator
+executes the quantum algorithm on a CPU; it is not the classical optimizer.
+
+Evidence is saved locally in
+[`analysis.json`](results_asset_lab/trading/20261125T052641Z-bda72df5/quantum/20261125T054410Z-e67f5956/analysis.json)
+and
+[`hardware_results.json`](results_asset_lab/trading/20261125T052641Z-bda72df5/quantum/20261125T054410Z-e67f5956/ibm/hardware_results.json).
+Generated results are ignored by Git, so these links require the original run.
+
+### Problems to solve
+
+1. **The current quantum task does not discover signals.** Classical code picks
+   eligible mean-reversion signals and supplies a covariance matrix and an
+   assumed convergence score. QAOA chooses a subset using that supplied
+   objective. The earlier correlation demo also computes correlations locally.
+   Neither experiment asks the QPU to learn an unknown predictive relationship.
+2. **The encoding wastes samples before hardware noise is introduced.** Over
+   half the ideal samples violate the unused-slot constraint. Its unconditional
+   optimum rate already trails uniform sampling of valid choices. Circuit
+   design, constraint handling, angle fitting, and hardware effects need separate
+   investigation; noise alone cannot explain the current shortfall.
+3. **The benchmark is too small to demonstrate a computational need for QC.**
+   Four choices are trivial to enumerate. Ten qubits have 1,024 state amplitudes,
+   so a small ideal circuit can also be simulated classically. The current local
+   implementation caps experiments at 16 total qubits and uses enumeration and
+   statevectors. More assets or a larger backend alone do not establish value.
+4. **Optimizing this score is not evidence of trading profit.** The convergence
+   score assumes a stationary peer basket and is not a calibrated return
+   forecast. The hardware example does not evaluate subsequent realized P&L or
+   alter the historical trading ledger.
+5. **The initial trading hypothesis has no demonstrated edge.** The saved
+   walk-forward preset returned **-5.45% after 10 bps per side**, across 74
+   completed trades from January 3, 2012 through November 24, 2026. Its zero-cost
+   result was also negative. Average invested exposure was only 3.12%, so raw
+   comparisons with fully invested buy-and-hold are not alpha estimates.
+   See the saved
+   [`trading.json`](results_asset_lab/trading/20261125T052641Z-bda72df5/trading.json).
+6. **We have not measured the full cost of a discovery.** Angle optimization,
+   simulation, duplicate proposals, invalid samples, data preparation, QPU
+   execution, and classical evaluation all consume resources. A fair comparison
+   needs repeated trials and declared budgets, not one favorable bitstring or
+   equal shot counts alone.
+7. **Novel-looking patterns can be false discoveries.** Selected-peer p-values
+   are nominal filters, the universe is fixed using present-day assets, and
+   repeatedly inspected historical periods are exploratory. Every feature,
+   strategy, and parameter search is another trial. New rules need validation
+   that search decisions cannot inspect, followed by timestamped forward tests.
+8. **The current journal is not a running trading account.** It records candidate
+   observations, without persistent account positions, paper fills, scheduling,
+   or forward realized P&L. Those are still required to test an eventual signal
+   as a trading system.
+
+## Revised objective: quantum-assisted signal discovery
+
+The question is: **Can a quantum-assisted model or search discover a useful
+market relationship that the specified classical methods miss under declared
+research budgets, and does that relationship remain useful after costs on
+unseen data?** Both approaches start before a profitable edge is known.
+
+Classical data preparation and backtesting remain necessary. The quantum
+component must influence which relationships are learned or proposed, rather
+than only selecting trades after our existing rules have defined the signals.
+All models see the same information available at each decision time.
+
+### First scaling experiment: account for the cost of Grover search
+
+The search path now has an offline feasibility prototype:
+
+```bash
+python -m pip install -r requirements-quantum.txt
+python quantum_search.py --demo
+```
+
+To construct its inputs from an existing adjusted-price snapshot:
+
+```bash
+python quantum_search.py \
+  --prices results_asset_lab/trading/YOUR_TRADING_RUN/prices.csv \
+  --training-end 2021-12-31 \
+  --episodes 8 \
+  --min-support 2 \
+  --min-score 1
+```
+
+This changes the quantum task from choosing prefiltered mean-reversion trades
+to searching conjunctions of observed market conditions. The prototype uses
+six binary conditions for SPY with QQQ as a market input: positive trailing
+1-, 5-, and 20-session returns, price above its 20-session mean, 5-session
+volatility above 20-session volatility, and positive 5-session market return.
+The target and market are configurable. A selected condition must hold for a
+rule to enter; selecting no conditions represents always entering.
+
+Inputs are the first chronological, nonoverlapping episodes after indicator
+warmup, with entry at the next session's close and a ten-session holding period.
+Only episodes ending on or before `--training-end` are included. The score is
+the **sum** of episode returns after ten-basis-point costs per side, rounded to
+25-basis-point units by default. `--min-score 1` means at least one such unit
+in aggregate, with at least `--min-support` trades. This is a deliberately
+simple training predicate, not a compounded portfolio return or proof of an
+edge. Rounding can change which rules pass; each episode's score differs from
+its unrounded return by at most half a score unit.
+
+The oracle computes eligibility, support, signed score arithmetic, threshold
+checks, and uncomputation from these observations. It does **not** receive a
+classically precomputed list of winning rules. There is no assumed QRAM or
+free call to a Python backtester inside the quantum circuit. Different binary
+feature sets can be supplied with `--episodes-csv`: one condition per column,
+with one integer `score_units` outcome per row. That input must already account
+for execution, costs, and training boundaries; price-specific flags apply only
+to `--prices`.
+
+Every run saves `episodes.csv`, `problem.json`, `audit.json`, provenance, and,
+for bounded cases, a complete `grover.qpy` / `grover.qasm` circuit under
+`results_asset_lab/search/`. The audit reports:
+
+- Search qubits **plus** support, score, and temporary workspace qubits.
+- Actual reference-compiled CX gates and depth for the oracle and exported
+  circuit. Compilation assumes all-to-all connectivity; device routing,
+  calibration, and error correction are not modeled.
+- A classical superset-sum baseline exploiting the conjunction structure,
+  rather than comparing only against independent brute-force checks.
+- A classical search merging rules that fire on the same historical episodes.
+  With `E` episodes there are at most `2^E` distinct firing sets, regardless of
+  how many nominal rule encodings exist. A huge bit count with very little data
+  can therefore remain easy classically and statistically underdetermined.
+- Ideal success versus iterations and black-box scaling up to 256 search bits.
+  These are mathematical diagnostics, not hardware measurements or market
+  forecasts. Small-case exhaustive scoring provides the marked count only for
+  validation; an unknown-solution search must account for learning or handling
+  an unknown marked fraction.
+
+Compilation/export is capped at 12 conditions, 16 episodes, and 12 score bits;
+exhaustive classical diagnostics stop above 20 conditions. Larger allowed
+inputs still get a register-size plan without an exponential statevector or
+precomputed answer table. This command submits no job, spends no QPU allocation,
+and does not change the trading ledger. Its files use a distinct experiment
+schema; the existing QAOA `ibm_quantum.py submit` command does not accept them.
+
+The first saved-price audit used six conditions and eight historical episodes:
+**20 total qubits, 4,043 CX gates, and depth 9,090 per oracle** in the reference
+compilation. Classical scoring found 17 passing rules among 64 in about 34
+microseconds; merging equivalent rules left just 20 distinct firing sets. This
+is the cost of this straightforward oracle, not a minimum achievable cost.
+The ideal formula gives 99.71% passing probability after one Grover iteration
+but 17.70% after two: amplification can overshoot even without hardware noise.
+These probabilities are mathematical diagnostics using the classically known
+marked count, not QPU results. Evidence:
+[`audit.json`](results_asset_lab/search/20261125T180633Z-827b39dd/audit.json).
+
+**Scaling has to follow an algorithmic advantage.** Grover reduces unstructured
+search from order `N/M` classical checks to order `sqrt(N/M)` coherent oracle
+calls for `M` marked candidates among `N` candidates. For a single
+marked item, `2^256 -> 2^128` is a quadratic improvement in `N = 2^256`, while
+both costs remain exponential in the 256-bit description. Even `2^128` calls
+would be infeasible here. Increasing QAOA shots does not implement this
+algorithm, and increasing a timeout only permits a longer job. Repetitions
+improve sampling precision; they do not remove circuit bias or hardware noise.
+More coherent depth can amplify a signal with the right algorithm, but it also
+accumulates errors. See [IBM's Grover explanation](https://quantum.cloud.ibm.com/learning/en/modules/computer-science/grovers)
+and its [circuit-depth discussion](https://eu-de.quantum.cloud.ibm.com/docs/en/tutorials/grovers-algorithm).
+
+The next gate is to reduce the measured oracle/workspace cost, test increasing
+rule sizes against strong classical methods, and measure the success curve on
+hardware where depth permits. A practical advantage requires saved search
+queries to outweigh oracle construction, coherent arithmetic, noise handling,
+and the best classical use of the same problem structure. Adding candidates
+alone does not establish that crossover. Broader search also creates more
+opportunities for historical overfitting, so any discovered rule still needs
+the unseen-data and forward checks below.
+
+### Alternative discovery experiment: learn a signal with quantum features
+
+This is a research plan, **not an implemented command**. Keep the current QAOA
+selector as a hardware and optimization benchmark while adding one discovery
+experiment with the following protocol:
+
+1. **Freeze one prediction task.** Start with a declared ETF universe and a
+   ten-session holding period, entering at the next session's close. Predict
+   forward returns and apply identical transaction costs, position limits, and
+   execution timing to every model. Do not require signals to pass the existing
+   mean-reversion filter; that would restrict discovery to its hypothesis.
+2. **Supply a small, shared set of observations.** Begin with six features such
+   as trailing 1-, 5-, and 20-session returns, 20-session volatility, the market's
+   trailing 5-session return, and trailing 60-session correlation with the
+   market. Fit scaling on training data only. This tests nonlinear combinations
+   and market regimes rather than only unconditional pairwise correlations.
+3. **Let the quantum computation affect the learned signal.** Encode those
+   features with parameterized rotations and entangling gates. Estimate a
+   quantum similarity kernel from the circuits and fit a classical predictor
+   using that kernel. The hypothesis is that this representation makes useful
+   relationships easier to learn. It is not assumed to contain extra market
+   information or to outperform classical representations.
+4. **Run credible controls alongside it.** Use the same features and temporal
+   splits for regularized linear models, polynomial and RBF kernels, boosted
+   trees, and a classical random-feature model. Include the ideal CPU simulation
+   of the identical quantum kernel and an unentangled circuit variant. Use
+   declared tuning budgets and record actual resource use. This separates the
+   feature representation's effect from hardware noise and classical fitting.
+5. **Bound the hardware work before submitting it.** Choose a small, fixed set
+   of kernel reference examples using training data only. Declare circuit,
+   shot, and retry limits; full pairwise kernel estimation grows quadratically
+   with the number of examples. Record data encoding, classical fitting,
+   compilation, QPU execution, and total elapsed time, with queue time separate.
+6. **Keep discovery separate from evaluation.** Tune on past training and
+   validation folds, purge labels crossing fold boundaries, and allow for the
+   holding period and execution delay. Freeze the full procedure before a final
+   test. Previously inspected historical data stays exploratory; timestamped
+   future observations provide new evidence. Record all trials, including failed
+   models, and assess uncertainty with methods that respect temporal dependence.
+7. **Judge economic usefulness and the quantum contribution separately.**
+   Report after-cost return, drawdown, turnover, exposure, calibration, and
+   stability across periods. Use comparable risk and exposure when assessing
+   excess performance. Check whether a combined classical-plus-quantum forecast
+   adds value over classical forecasts alone on validation, then freeze it for
+   testing. A different prediction or one successful trade is insufficient.
+
+Quantum feature maps and kernels are established methods, so using one is not
+itself a novelty claim; see
+[Havlicek et al., *Supervised learning with quantum enhanced feature spaces*](https://arxiv.org/abs/1804.11326).
+Classical models can also learn effectively from data even when a quantum
+representation is involved; see
+[Huang et al., *Power of data in quantum machine learning*](https://arxiv.org/abs/2011.01938).
+Any contribution would need to come from the tested market hypothesis,
+evaluation, or measured improvement.
+
+A separate heuristic search experiment could reuse QAOA to propose combinations of signal
+features or trading rules, evaluate them with the cost-aware backtester, and
+update a training-only surrogate score. QAOA requires an explicit objective; it
+cannot sample an unspecified notion of future profitability. Compare that loop
+with valid random sampling, local search, simulated annealing, and suitable
+classical black-box optimizers using matched evaluation budgets and reported
+overhead. QAOA has no general Grover-style quadratic search guarantee.
+Compare quantum and classical proposals from the **same** surrogate
+to isolate the sampler's contribution. A
+[2026 preprint on surrogate-guided quantum discovery](https://arxiv.org/abs/2602.09374)
+offers a conceptual precedent in document-processing risk discovery, not
+evidence of a market edge.
+
+### What a successful result could establish
+
+- **Useful discovery:** a quantum-assisted procedure finds a stable, after-cost
+  signal that the tested classical searches miss under the reported protocol.
+- **Added predictive value:** its forecasts improve unseen-data results beyond
+  strong classical controls, with uncertainty and all research trials reported.
+- **Computational advantage:** the full quantum-assisted workflow achieves a
+  specified quality with fewer relevant resources than strong classical
+  alternatives, including classical simulation where practical. This is a
+  separate, stronger claim and has not been demonstrated here.
+
+"The tested classical methods missed this signal under these budgets" is a
+testable claim. "No classical computer could find it" does not follow from
+that result. A six-to-ten-qubit discovery experiment can test a research
+hypothesis, but its small circuits can be simulated classically. The signal
+could still be economically useful without establishing that quantum hardware
+is necessary. A negative result should also be retained and reported.
 
 ## Trading research
 

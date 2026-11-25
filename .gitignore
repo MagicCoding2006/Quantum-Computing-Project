@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+data_cache/
+results_checklist/
+results_asset_lab/
+.DS_Store

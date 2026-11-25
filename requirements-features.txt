@@ -1,0 +1,2 @@
+# Optional shallow-feature predictive experiment and classical model controls.
+scikit-learn>=1.6,<2

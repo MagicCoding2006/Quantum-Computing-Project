@@ -20,6 +20,8 @@ offline Grover rule-search feasibility prototype. Validated signal discovery
 remains a research goal; the trade selector does not implement signal learning.
 `grover_lab.py` adds frozen comparison protocols, local noise sampling,
 device-native IBM planning, explicit batch submission, and a visual results report.
+`feature_lab.py` tests a much shallower six-qubit representation in a
+chronological market-prediction study with classical controls and trading costs.
 
 ## Known problems and research gaps
 
@@ -413,11 +415,139 @@ alone does not establish that crossover. Broader search also creates more
 opportunities for historical overfitting, so any discovered rule still needs
 the unseen-data and forward checks below.
 
-### Alternative discovery experiment: learn a signal with quantum features
+### Shallow predictive experiment: learn with quantum features
 
-This is a research plan, **not an implemented command**. Keep the current QAOA
-selector as a hardware and optimization benchmark while adding one discovery
-experiment with the following protocol:
+The implemented `feature_lab.py` path avoids the Grover arithmetic oracle.
+It asks whether a small quantum representation contributes useful predictive
+information on the same market observations supplied to classical models.
+The default is a **single-target pilot**, predicting SPY using SPY and QQQ
+features. `--target` and `--market` can select other distinct assets; changing
+them is another research trial, not an independent confirmation of an edge.
+
+```bash
+python -m pip install -r requirements-features.txt -r requirements-quantum.txt
+python feature_lab.py run \
+  --prices results_asset_lab/trading/YOUR_TRADING_RUN/prices.csv \
+  --end 2026-11-24 --open
+```
+
+The study is saved under `results_asset_lab/features/`. It freezes its input
+prices, observation dates, configuration, numerical procedure hash, and two
+parameterized circuits before evaluation. Six continuous inputs are trailing
+1-, 5-, and 20-session returns, 20-session volatility, the market's 5-session
+return, and the trailing 60-session return correlation. Scaling uses training
+observations only; the circuit angles are `arctan(standardized_input)`.
+
+The product control uses local rotations and no entangling gates. The entangled
+variant adds **five CZ gates in two layers**, with no arithmetic workspace.
+Both measure six Z expectations and five adjacent ZZ expectations from the
+same six-bit samples. The classical readout is ridge regression. These are
+projected quantum features, not a full pairwise quantum kernel matrix.
+
+Defaults are 128 training, 64 validation, and 64 test episodes with ten-session
+holding periods. Episodes are chronological and nonoverlapping; the most recent
+completed episodes before the inclusive `--end` are used. Every target begins
+at the following session's close, so outcomes are complete before the next
+split's first decision. Hyperparameters and the overall model family are chosen
+by **validation MSE only**. Each selected model is refitted on training plus
+validation outcomes before predicting the test block. The input-angle scaler
+remains fixed from the original training block. Previously inspected historical
+data stays exploratory; this is not a pristine final test or forward P&L.
+
+Controls are the historical mean, linear ridge, RBF kernel ridge, boosted trees,
+classical trigonometric features, and seeded random Fourier features. The mean
+has no tuning parameters; every other family has twelve declared candidates.
+The product circuit separates local nonlinear encoding from entanglement.
+Classical controls receive the same observations and temporal boundaries.
+The report retains every family, not just the best test-period return.
+
+The fixed policy holds the target long when its forecast net of round-trip costs
+is positive, otherwise cash. Purchases and sales each cost ten basis points by
+default. Fractional units, cash, fees, and daily equity are reconciled; cash
+interest is zero and no leverage or shorting is used. Benchmarks include cash,
+always entering the same episode windows, and buy and hold with entry/exit costs.
+Cost scenarios retain the same trades. Their exposures differ, so return
+differences alone are not alpha. Four-episode paired block-bootstrap intervals
+are descriptive and do not correct for research selection or multiple tests.
+
+The local report includes exact CPU-simulated quantum features and finite-shot
+sampling of those features. Neither is an IBM measurement. To prepare a hardware
+measurement of a **new, unsubmitted study**:
+
+```bash
+python feature_lab.py plan --run YOUR_FEATURE_STUDY --backend ibm_kingston
+```
+
+The device plan selects a connected six-qubit path using calibration errors,
+independently of market outcomes. Both variants share the initial physical
+layout. Observation rows are submitted in a seeded permutation shared between
+variants and restored to chronological order before fitting. Every bound native
+instance is checked against the ideal observable values in noiseless simulation.
+The plan refuses more than twenty native two-qubit gates or depth one hundred.
+
+Planning prints an explicit submission command:
+
+```bash
+python feature_lab.py submit --run YOUR_FEATURE_STUDY --plan YOUR_NATIVE_FEATURE_PLAN --max-execution-seconds 60
+python feature_lab.py collect --run YOUR_FEATURE_STUDY --open
+```
+
+At default sizes, two parameterized PUBs cover 256 observations each, with 256
+shots per observation: **131,072 measurement shots total**. These are repetitions
+of shallow circuits, not one long coherent calculation. Submission records an
+exclusive attempt before sending the job and refuses automatic retries.
+Collection preserves paid raw counts before model evaluation, validates the
+parameter-batch dimensions, and refits the same frozen procedure using the
+measured training/validation features. The test outcomes never choose model
+parameters. Twirling and dynamical decoupling are explicitly disabled for this
+pilot; no readout mitigation is applied.
+
+The report separates physical feature quality from market prediction. Observable
+RMSE versus ideal is an error diagnostic, not full-state fidelity. Strong hardware
+agreement would show that the shallow circuit is usable; it would not establish
+a predictive edge. Six-qubit circuits are readily simulated classically, so
+neither a profitable backtest nor different features prove quantum hardware is
+necessary. No broker orders, paper fills, or scheduled forward trading are
+created by this command.
+
+The first measured study is
+[`20261125T192740Z-340e9355`](results_asset_lab/features/20261125T192740Z-340e9355/report.html).
+Job `dc3jh02nj2vs73dig0o0` completed on `ibm_kingston`, using 37 charged QPU
+seconds and 0.616349 resource units. Its entangled circuit used five native
+two-qubit gates at depth twelve. Product and entangled variants shared physical
+qubits, and all 512 bound native instances matched their ideal observables to
+less than `2e-15` before submission.
+
+Hardware observable RMSE versus ideal was 0.0556 for the product control and
+0.0581 for the entangled features. Finite-shot-only references were 0.0509 and
+0.0518 respectively. This supports usable measurement of these shallow
+features, not full-state fidelity or a financial advantage.
+
+The chronological test entered January 24, 2024 and ended November 11, 2026,
+with ten-basis-point costs on each buy and sell:
+
+| Fixed procedure | Net test total return | Mean invested exposure |
+| --- | --- | --- |
+| Hardware entangled features | 25.56% | 89.36% |
+| Hardware product control | 27.03% | 90.78% |
+| Validation-selected classical model: boosted trees | 28.06% | 58.16% |
+| Always long in the same episode windows | 27.03% | 90.78% |
+| SPY buy and hold | 61.34% | Almost fully invested |
+
+These are total historical returns, not annualized returns or forecasts.
+The model winner was chosen by validation MSE, not by looking for the highest
+test return. The entangled model's paired interval for mean episode-return
+difference versus that classical comparator spans roughly -34.0 to +28.5 basis
+points and includes zero. Differences in exposure also prevent interpreting
+raw return differences as alpha. This pilot demonstrates a working shallow
+QPU feature pipeline but no demonstrated quantum trading edge. The test period
+was already present in earlier project research and remains exploratory.
+
+#### Possible kernel extension
+
+A full quantum similarity kernel remains a separate research proposal. It
+would replace the local Z/ZZ representation and require its own frozen budget
+and evaluation, including the following controls:
 
 1. **Freeze one prediction task.** Start with a declared ETF universe and a
    ten-session holding period, entering at the next session's close. Predict
